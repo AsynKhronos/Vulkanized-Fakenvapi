@@ -1,0 +1,27 @@
+# Meson / Ninja build trees
+build/
+build-*/
+meson-logs/
+meson-private/
+compile_commands.json
+
+# Local testing / scratch
+testing/
+useful/
+*.log
+*.tmp
+*.bak
+
+# IDE / editor
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+
+# Local helper files
+build_testing.bat
+testing.sh
+
+# Generated release output
+dist/
