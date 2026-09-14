@@ -1,0 +1,248 @@
+#include <unordered_map>
+
+#include <dxgi.h>
+#include <d3d11.h>
+#include <windows.h>
+#include <filesystem>		
+#include <nvapi_interface.h>
+#if _MSC_VER
+#include <d3d12.h>
+#else
+#include "../external/d3d12.h"
+#endif
+#include "nvapi_mingw_compat.h"
+#include "fakenvapi.h"
+#include "fakexell.h"
+#include "streamline_capability.h"
+#include "vulkan_hooks.h"
+#include "openxr_hooks.h"
+#include "audio_hooks.h"
+#include "../version.h"
+#include "al2_proxy.h"
+
+#include "log.h"
+#include "config.h"
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
+    switch (fdwReason) {
+    case DLL_PROCESS_ATTACH:
+        LowLatencyCtx::init();
+
+        {
+            char dllPath[MAX_PATH];
+            GetModuleFileNameA(hinstDLL, dllPath, MAX_PATH);
+            auto dll = std::filesystem::path(dllPath);
+            std::string path = dll.parent_path().append("fakenvapi.log").string();
+
+            Config::get().init_config();
+            if (Config::get().get_enable_logs())
+                if (Config::get().get_enable_trace_logs())
+                    prepare_logging(spdlog::level::trace, path);
+                else
+                    prepare_logging(spdlog::level::info, path);
+            else
+                prepare_logging(spdlog::level::off, path);
+
+            Config::get().set_logging_ready();
+        }
+
+        spdlog::critical("Vulkanized-Fakenvapi version: {}", VULKANIZED_FAKENVAPI_VERSION);
+
+        {
+            char exe_path[MAX_PATH] = { 0 };
+            GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+            const char* exe_name = strrchr(exe_path, '\\');
+            exe_name = exe_name ? exe_name + 1 : exe_path;
+
+            // Late-loaded Vulkan is handled by VulkanHooks::initialize() through a
+            // LoadLibrary watcher; this initial probe keeps the zero-overhead
+            // path when the loader is already present.
+            auto vulkan_module = GetModuleHandleA("vulkan-1.dll");
+
+            // HACK: Force load vulkan-1 in rtx remix
+            // Avoids having to wait for the game to load it
+            const bool force_load = _stricmp(exe_name, "NvRemixBridge.exe") == 0;
+            if (!vulkan_module && force_load) {
+                vulkan_module = LoadLibraryA("vulkan-1.dll");
+                if (!vulkan_module) {
+                    spdlog::warn("Failed to load vulkan-1.dll");
+                } else {
+                    spdlog::info("vulkan-1.dll loaded");
+                }
+            }
+
+            VulkanHooks::initialize(vulkan_module);
+            OpenXRHooks::initialize(GetModuleHandleA("openxr_loader.dll"));
+            AudioHooks::initialize();
+
+            if (_stricmp(exe_name, "MonsterHunterRise.exe") == 0) {
+                spdlog::info("MonsterHunterRise.exe detected, killing config monitoring");
+                Config::get().kill_config_monitoring();
+            }
+
+            if (_stricmp(exe_name, "KunitsuGami.exe") == 0) {
+                spdlog::info("KunitsuGami.exe detected, killing config monitoring");
+                Config::get().kill_config_monitoring();
+            }
+        }
+
+        StreamlineCapability::Init();
+        fakexell::Init();
+        AL2Proxy::hookAntiLag();
+
+        break;
+    case DLL_PROCESS_DETACH:
+        // LowLatencyCtx::get()->deinit_current_tech();
+        Config::get().kill_config_monitoring();
+        AudioHooks::shutdown();
+        OpenXRHooks::shutdown();
+        VulkanHooks::shutdown();
+        close_logging();
+        LowLatencyCtx::shutdown();
+        break;
+    }
+    return TRUE;
+}
+
+// names from: https://github.com/SveSop/nvapi_standalone/blob/master/dlls/nvapi/nvapi.c
+NVAPI_INTERFACE_TABLE additional_interface_table[] = {
+    { "NvAPI_Diag_ReportCallStart", 0x33c7358c },
+    { "NvAPI_Diag_ReportCallReturn", 0x593e8644 },
+    { "NvAPI_Unknown_1", 0xe9b009b9 },
+    { "NvAPI_SK_1", 0x57f7caac },
+    { "NvAPI_SK_2", 0x11104158 },
+    { "NvAPI_SK_3", 0xe3795199 },
+    { "NvAPI_SK_4", 0xdf0dfcdd },
+    { "NvAPI_SK_5", 0x932ac8fb }
+};
+
+namespace fakenvapi {
+    extern "C" {
+        NvAPI_Status __cdecl placeholder() {
+            // return OK();
+            // return ERROR(NVAPI_NO_IMPLEMENTATION);
+            return NVAPI_NO_IMPLEMENTATION; // no logging
+        }
+
+        static std::unordered_map<NvU32, void*> registry;
+
+        __declspec(dllexport) void* __cdecl nvapi_QueryInterface(NvU32 id) {
+            auto entry = registry.find(id);
+            if (entry != registry.end())
+                return entry->second;
+
+            constexpr auto original_size = sizeof(nvapi_interface_table)/sizeof(nvapi_interface_table[0]);
+            constexpr auto additional_size = sizeof(additional_interface_table)/sizeof(additional_interface_table[0]);
+            constexpr auto fakenvapi_size = sizeof(fakenvapi_interface_table)/sizeof(fakenvapi_interface_table[0]);
+
+            constexpr auto total_size = original_size + additional_size + fakenvapi_size;
+
+            struct NVAPI_INTERFACE_TABLE extended_interface_table[total_size] {};
+            memcpy(extended_interface_table, nvapi_interface_table, sizeof(nvapi_interface_table)); // copy original table
+
+            for (unsigned int i = 0; i < additional_size; i++) {
+                extended_interface_table[original_size + i] = additional_interface_table[i];
+            }
+
+            for (unsigned int i = 0; i < fakenvapi_size; i++) {
+                extended_interface_table[original_size + additional_size + i].func = fakenvapi_interface_table[i].func;
+                extended_interface_table[original_size + additional_size + i].id = fakenvapi_interface_table[i].id;
+            }
+
+            auto it = std::find_if(
+                std::begin(extended_interface_table),
+                std::end(extended_interface_table),
+                [id](const auto& item) { return item.id == id; });
+
+            if (it == std::end(extended_interface_table)) {
+                spdlog::debug("NvAPI_QueryInterface (0x{:x}): Unknown interface ID", id);
+                return registry.insert({ id, nullptr }).first->second;
+            }
+
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Initialize)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetInterfaceVersionString)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumNvidiaDisplayHandle)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetLogicalGPUFromPhysicalGPU)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumPhysicalGPUs)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumLogicalGPUs)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetGPUIDfromPhysicalGPU)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUFromGPUID)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUsFromDisplay)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUsFromLogicalGPU)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetErrorMessage)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetDisplayDriverVersion)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetLogicalGpuInfo)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetConnectedDisplayIds)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_CudaEnumComputeCapableGpus)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetArchInfo)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetPCIIdentifiers)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetFullName)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetGpuCoreCount)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetAllClockFrequencies)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetAdapterIdFromPhysicalGpu)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetPstates20)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DISP_GetDisplayIdByDisplayName)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DISP_GetGDIPrimaryDisplayId)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_SetOutputMode)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_GetOutputMode)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_GetHdrCapabilities)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_HdrColorControl)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Mosaic_GetDisplayViewportsByResolution)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDisplayDriverInfo)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDriverAndBranchVersion)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDisplayIdFromGpuAndOutputId)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetGpuAndOutputIdFromDisplayId)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetResourceHint)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetObjectHandleForResource)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetSleepStatus)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetLatency)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetSleepMode)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetLatencyMarker)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_Sleep)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetReflexSync)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_IsNvShaderExtnOpCodeSupported)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_BeginUAVOverlap)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_EndUAVOverlap)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_SetDepthBoundsTest)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_GetRaytracingCaps)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_IsNvShaderExtnOpCodeSupported)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_SetNvShaderExtnSlotSpaceLocalThread)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_BuildRaytracingAccelerationStructureEx)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_NotifyOutOfBandCommandQueue)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_SetAsyncFrameMarker)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_InitLowLatencyDevice)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_DestroyLowLatencyDevice)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_GetSleepStatus)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_SetSleepMode)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_Sleep)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_GetLatency)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_SetLatencyMarker)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_NotifyOutOfBandVkQueue)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_CreateSession)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_LoadSettings)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_SaveSettings)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_GetBaseProfile)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_GetSetting)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_SetSetting)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_DestroySession)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Unknown_1)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_1)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_2)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_3)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_4)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_5)
+            INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Unload)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_GetLatency)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_InformFGState)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_InformPresentFG)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_GetAntiLagCtx)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_GetLowLatencyCtx)
+            INSERT_AND_RETURN_WHEN_EQUALS(Fake_SetLowLatencyCtx)
+
+            spdlog::debug("{}: not implemented, placeholder given", it->func);
+            return registry.insert({ id, (void*)placeholder }).first->second;
+            // return registry.insert({ id, nullptr }).first->second;
+        }
+    }
+}
