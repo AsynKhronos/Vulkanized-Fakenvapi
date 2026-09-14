@@ -1,0 +1,4 @@
+[wrap-git]
+url = https://github.com/microsoft/Detours.git
+revision = adb07604aa56508448b95bf037c2a6d0d3b6831a
+patch_directory = detours-meson

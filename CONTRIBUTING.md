@@ -1,69 +1,78 @@
 # Contributing to Vulkanized-Fakenvapi
 
-Contributions are welcome, but changes to latency, synchronization, capability detection, or hot paths must be
-reviewable and measurable.
+Vulkanized-Fakenvapi operates at API, timing, loader, and translation-layer boundaries. Small ownership mistakes can create double pacing, invalid frame correlation, deadlocks, or title-specific regressions. Contributions therefore need evidence, not only plausible code.
 
-## Before opening a pull request
+## Before opening an issue
 
-1. Keep the change narrowly scoped.
-2. Explain the problem before explaining the solution.
-3. Preserve upstream copyright and license notices.
-4. Add or update tests where practical.
-5. Do not claim performance improvements without measurements.
-6. Avoid adding dependencies unless they solve a measured problem.
+Search existing issues first. For a runtime bug, capture at least:
 
-## Development principles
+- game/application and version;
+- graphics API (`D3D11`, `D3D12`, native Vulkan, OpenXR where relevant);
+- GPU and driver/Mesa version;
+- Wine/Proton build and translation stack (`VKD3D-Proton`, `DXVK`, native Windows, etc.);
+- Vulkanized-Fakenvapi commit/tag;
+- relevant `fakenvapi.ini` changes;
+- exact steps to reproduce;
+- expected and actual behavior;
+- sanitized Vulkanized-Fakenvapi log excerpts around initialization, capability detection, backend selection, and failure.
 
-- Vulkan is the primary graphics API target.
-- Linux / Wine / Proton behavior is first-class.
-- Capability detection and backend activation should remain separate.
-- Runtime fallback must be deterministic.
-- Hot-path allocations should be avoided unless justified.
-- Logging and overlays must not materially disturb frame pacing.
-- Unsupported states should fail clearly rather than silently selecting an unsafe path.
+Do not attach proprietary game binaries, DRM material, access tokens, crash dumps containing secrets, or private user data.
 
-## Build
+## Development rules
 
-See [docs/building.md](docs/building.md).
+Changes to latency ownership or frame timing must preserve these invariants unless the architecture documentation is explicitly revised and the change is justified:
 
-## Pull request checklist
+1. exactly one active pacing/execution owner per relevant frame loop;
+2. native driver/runtime ownership wins when policy says it is authoritative;
+3. cooperative VKD3D/DXVK observer paths do not create a second Vulkan device/WSI owner;
+4. OpenXR XRFlex remains observer-only unless a future milestone deliberately changes that contract;
+5. hot paths avoid unbounded allocation, blocking global locks, repeated dynamic probing, and uncontrolled logging;
+6. unrelated native frame-ID domains are not compared as though they were identical;
+7. fallback paths fail open rather than destabilizing the application.
 
-A pull request should state:
+## Build and test
 
-- **Problem:** What is wrong or missing?
-- **Change:** What did you change?
-- **Compatibility:** Which games, GPUs, drivers, Wine/Proton versions, or backends are affected?
-- **Validation:** What tests did you run?
-- **Performance:** Is the hot path affected? If yes, include before/after data.
-- **Fallback:** What happens if the new path is unavailable?
+Run the complete host suite before submitting:
 
-## Performance changes
+```bash
+./scripts/ci-host.sh
+```
 
-Where relevant, include:
+For changes that affect Windows-facing code, also perform a clean MinGW x64 build:
 
-- CPU model
-- GPU / driver
-- compiler and version
-- build type
-- benchmark method
-- sample count
-- median / percentile data
-- before and after results
+```bash
+rm -rf build-win64 subprojects/detours
+meson subprojects download detours
+meson setup build-win64 --cross-file build-win64.txt --buildtype release
+ninja -C build-win64
+```
 
-A one-off FPS screenshot is not sufficient evidence for a performance claim.
+If the change affects x86 behavior or ABI, validate `build-win32.txt` as well.
 
-## Coding style
+Timing/pacing changes require runtime evidence in at least one representative affected path. Source audits alone are not runtime proof.
 
-Until a project-specific style guide is frozen:
+## Pull requests
 
-- follow the style of surrounding code,
-- prefer clear ownership and lifetime semantics,
-- avoid unnecessary abstraction,
-- avoid hidden global state,
-- use comments for *why*, not for obvious *what*,
-- compile cleanly with the project's warning policy.
+Keep pull requests narrow. Explain:
 
-## Security-sensitive issues
+- the problem and failure mode;
+- why the chosen layer owns the fix;
+- ownership/concurrency implications;
+- new or modified tests;
+- build result;
+- runtime result, when applicable;
+- known limitations.
 
-Do not open a public issue for a vulnerability that could lead to code execution, unsafe DLL loading,
-privilege escalation, or similar security impact. Follow [SECURITY.md](SECURITY.md).
+Avoid unrelated formatting churn in low-level source files.
+
+## Performance claims
+
+Microbenchmarks must identify the host, compiler, build flags, sample methodology, and exact measured path. Do not present CPU-path nanosecond improvements as measured end-to-end game latency unless you actually measured end-to-end latency.
+
+## Third-party code
+
+Do not add third-party source or binaries without preserving the applicable copyright/license text and updating `THIRD_PARTY_NOTICES.md` where necessary.
+
+## Style
+
+The project targets modern C++23. Prefer explicit ownership, bounded state, deterministic cleanup, and clear comments around ABI/driver/runtime constraints. Performance-sensitive changes should be measurement-driven rather than speculative.

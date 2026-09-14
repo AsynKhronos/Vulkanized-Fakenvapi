@@ -1,38 +1,23 @@
 # Security Policy
 
-## Supported versions
+## Supported code line
 
-Until the first stable release, only the current development branch is expected to receive security fixes.
+Security fixes are expected to target the current development line. Older source snapshots may not receive backports.
 
 ## Reporting a vulnerability
 
-Please do **not** open a public issue for a security vulnerability that may enable:
+Do **not** publish exploit details, private crash material, credentials, or security-sensitive logs in a public issue.
 
-- arbitrary code execution,
-- unsafe DLL / shared-library loading,
-- privilege escalation,
-- path traversal,
-- malicious configuration execution,
-- memory corruption,
-- unsafe handling of untrusted game data.
+Use GitHub's **Private vulnerability reporting** feature for this repository when available. If private reporting is not enabled, open a minimal public issue stating that you need a private security contact channel, without including vulnerability details.
 
-Use GitHub's private security advisory / private vulnerability reporting feature if it is enabled for this
-repository.
+A useful report should contain the affected commit/tag, environment, impact, reproducibility conditions, and the smallest non-sensitive proof needed to validate the problem.
 
-If private reporting is not enabled, contact the repository owner privately through a published maintainer
-contact channel before disclosing technical details publicly.
+## Scope
 
-Include:
+Relevant security issues include memory-safety defects, unsafe DLL loading behavior, privilege-boundary problems, malicious configuration/file parsing, and vulnerabilities introduced by the proxy/hook/runtime logic.
 
-- affected commit / release,
-- reproduction steps,
-- expected and observed behavior,
-- impact,
-- proof of concept if appropriate,
-- suggested mitigation if known.
+Game anti-cheat bans, unsupported modding policies, general Wine/Proton bugs, and vulnerabilities exclusively in an upstream dependency should normally be reported to the responsible upstream project as well.
 
-## Anti-cheat / online-game warning
+## No bypass objective
 
-Vulkanized-Fakenvapi is intended for compatibility and experimentation. Injected or substituted libraries can
-be incompatible with anti-cheat systems. Do not assume that a technically functional setup is permitted by a
-game's terms or safe for an online account.
+Vulkanized-Fakenvapi is a compatibility and latency research project. Security fixes must not intentionally add anti-cheat, DRM, licensing, or platform-security bypass behavior.
